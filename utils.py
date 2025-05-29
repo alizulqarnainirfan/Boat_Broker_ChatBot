@@ -1,120 +1,120 @@
-## utils.py
-
-from datetime import datetime, timedelta
+# Utils functions
 import re
+import json
+from datetime import datetime, timedelta
 
-def normalize_nl_dates(text: str) -> str:
+def cleaned_sql(sql: str) -> str:
+
     """
-    Replace vague natural language dates like "last month", "this year" with specific SQL-compatible date expressions.
+    Cleans the raw SQL generated from LLM into executable SQL
     """
-    now = datetime.now()
-    replacements = {
-        r"last month": _range_last_month(now),
-        r"this month": _range_this_month(now),
-        r"last year": _range_last_year(now),
-        r"this year": _range_this_year(now),
-        r"last quarter": _range_last_quarter(now),
-        r"this quarter": _range_this_quarter(now),
-    }
 
-    for pattern, (start, end) in replacements.items():
-        if re.search(pattern, text, re.IGNORECASE):
-            text = re.sub(pattern, f"between '{start}' and '{end}'", text, flags=re.IGNORECASE)
-    return text
+    match = re.search(r'```sql\n(.*?)\n```', sql, re.DOTALL)
 
-def _range_last_month(now):
-    first = now.replace(day=1)
-    last_month_end = first - timedelta(days=1)
-    last_month_start = last_month_end.replace(day=1)
-    return (last_month_start.strftime("%Y-%m-%d"), last_month_end.strftime("%Y-%m-%d"))
-
-def _range_this_month(now):
-    start = now.replace(day=1)
-    end = (start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
-    return (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-
-def _range_last_year(now):
-    start = now.replace(year=now.year - 1, month=1, day=1)
-    end = now.replace(year=now.year - 1, month=12, day=31)
-    return (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-
-def _range_this_year(now):
-    start = now.replace(month=1, day=1)
-    end = now.replace(month=12, day=31)
-    return (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-
-def _range_last_quarter(now):
-    current_q = (now.month - 1) // 3 + 1
-    last_q = current_q - 1 if current_q > 1 else 4
-    year = now.year if current_q > 1 else now.year - 1
-    return _quarter_range(year, last_q)
-
-def _range_this_quarter(now):
-    current_q = (now.month - 1) // 3 + 1
-    return _quarter_range(now.year, current_q)
-
-def _quarter_range(year, quarter):
-    start_month = 3 * (quarter - 1) + 1
-    start = datetime(year, start_month, 1)
-    end_month = start_month + 2
-    last_day = (datetime(year, end_month + 1, 1) - timedelta(days=1)).day
-    end = datetime(year, end_month, last_day)
-    return (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
-
-# Helper function to check if a query is related to business
-def is_business_query(user_input: str) -> bool:
-    """
-    Checks if the user input contains business-related terms that indicate a query related to metrics.
-    """
-    business_keywords = [
-        "sales", "revenue", "leads", "vendors", "marketing", "commission", "buyers", 
-        "clients", "orders", "profit", "monthly", "total", "generated", "deals", "vendor", "buyer"
-    ]
-    
-    return any(keyword in user_input.lower() for keyword in business_keywords)
-
-# Helper function to extract SQL query from the assistant's response
-def extract_sql(response: str) -> str:
-    """
-    Extracts an SQL query from the response if it's enclosed in markdown (e.g., ```sql`...`).
-    """
-    match = re.search(r'```sql\n(.*?)\n```', response, re.DOTALL)
     if match:
         return match.group(1).strip()
-    return ""
+    
+    else:
+        return ""
+    
+def is_safe_sql(sql : str) -> bool:
+    
+    """
+    Checks if the SQL Query given to chatbot s safe to execute
+    """
+    forbidden_keywords = ['delete', 'drop', 'truncate', 'update', 'alter']
 
-import re
+    lowered = sql.lower()
+
+    return not any(keyword in lowered for keyword in forbidden_keywords)
+
+
 from datetime import datetime, timedelta
+import calendar
 
-# Simple report detection
-def is_report_request(user_input: str) -> bool:
-    report_keywords = ["report", "download", "export", "summary", "csv", "xlsx", "generate"]
-    return any(word in user_input.lower() for word in report_keywords)
+def parse_vague_time_phrases(text: str) -> dict:
+    """
+    Detects vague time phrases and converts them to start and end dates.
+    Returns: {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"} or {} if not detected.
+    """
 
-# Extract keywords from user query
-def extract_report_filters(user_input: str) -> dict:
-    filters = {}
-
-    # Basic type detection
-    for key in ["vendors", "buyers", "sellers", "sales", "marketing"]:
-        if key in user_input.lower():
-            filters["type"] = key
-            break
-
-    # Detect category (all, new, won)
-    for cat in ["new", "all", "won"]:
-        if cat in user_input.lower():
-            filters["category"] = cat
-            break
-
-    # Detect time ranges
+    text = text.lower().strip()
     now = datetime.now()
-    if "last month" in user_input.lower():
-        start = (now.replace(day=1) - timedelta(days=1)).replace(day=1)
-        end = start.replace(day=28) + timedelta(days=4)  # end of month trick
-        filters["start_date"] = start.strftime("%Y-%m-%d")
-        filters["end_date"] = (end - timedelta(days=end.day)).strftime("%Y-%m-%d")
 
-    # Fallback: no date
-    return filters
+    def quarter_date_range(ref_date, offset_quarters=0):
+        current_month = ref_date.month
+        current_quarter = (current_month - 1) // 3 + 1
+        target_quarter = current_quarter + offset_quarters
 
+        # Calculate target year and quarter
+        target_year = ref_date.year + ((target_quarter - 1) // 4)
+        target_quarter = ((target_quarter - 1) % 4) + 1
+
+        start_month = (target_quarter - 1) * 3 + 1
+        end_month = start_month + 2
+
+        start_date = datetime(target_year, start_month, 1)
+        last_day = calendar.monthrange(target_year, end_month)[1]
+        end_date = datetime(target_year, end_month, last_day)
+
+        return start_date, min(end_date, now)
+
+    phrases = {
+        "last month": lambda: (
+            (now.replace(day=1) - timedelta(days=1)).replace(day=1),
+            (now.replace(day=1) - timedelta(days=1))
+        ),
+        "this month": lambda: (
+            now.replace(day=1),
+            now
+        ),
+        "last year": lambda: (
+            datetime(now.year - 1, 1, 1),
+            datetime(now.year - 1, 12, 31)
+        ),
+        "this year": lambda: (
+            datetime(now.year, 1, 1),
+            now
+        ),
+        "this week": lambda: (
+            now - timedelta(days=now.weekday()),
+            now
+        ),
+        "last week": lambda: (
+            (now - timedelta(days=now.weekday() + 7)),
+            (now - timedelta(days=now.weekday() + 1))
+        ),
+        "yesterday": lambda: (
+            now - timedelta(days=1),
+            now - timedelta(days=1)
+        ),
+        "today": lambda: (
+            now,
+            now
+        ),
+        "this quarter": lambda: quarter_date_range(now),
+        "last quarter": lambda: quarter_date_range(now, offset_quarters=-1)
+    }
+
+    for phrase, date_func in phrases.items():
+        if phrase in text:
+            start, end = date_func()
+            return {
+                "start_date": start.strftime("%Y-%m-%d"),
+                "end_date": end.strftime("%Y-%m-%d")
+            }
+
+    return {}
+
+
+def clean_llm_json_response(response: str) -> dict:
+    """
+    Cleans LLM response by removing ```json and ``` wrappers and parses the JSON.
+    """
+    # Remove code block markers like ```json or ```
+    cleaned = re.sub(r"```(?:json)?", "", response).strip("` \n")
+    
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse JSON: {e}\nCleaned content:\n{cleaned}")

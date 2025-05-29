@@ -1,7 +1,5 @@
-# Python virtual environment
-venv/
 __pycache__/
-*.pyc
-
-# Environment variables
+virenv/
 .env
+schema of boat.txt
+brochure.pdf

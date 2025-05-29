@@ -1,427 +1,248 @@
-## main.py
+# API endpoints and Chat logics here
+# Main logic of API and code here
 
-import os
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from chat import handle_chat  # Handle conversation with the assistant
-from report import generate_csv_report  # Handle report generation logic
-from memory import ChatMemory  # In-memory conversation history
-from utils import normalize_nl_dates, extract_sql, is_business_query
-from db import fetch_schema, get_connection
-import google.generativeai as genai
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
-from typing import Optional
-from prompts import build_prompt
-from utils import is_report_request, extract_report_filters
-from report import generate_csv_report
+import mysql.connector
 
-# Configure Gemini (Gemini API for chat and responses)
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-2.0-flash")
+# Loading Modules
+from db import fetch_schema, execute_query, get_connection
+from prompts import sql_prompt, llm_prompt, intent_prompt, build_where_clause_query
+from utils import cleaned_sql, is_safe_sql, parse_vague_time_phrases, clean_llm_json_response
+from llm import llm_response, llm_response_stream
+from memory import get_history, append_to_history, clear_history
+# from brochures import router as brochure_router
+from brochures import generate_brochure
+from reports import extract_filters_via_llm, generate_excel_report, sales_report_select_clause
 
-# FastAPI app setup
-app = FastAPI(title="Boat Broker Admin Chatbot", description="Smart assistant for managing sales, vendors, leads, and reports.", version="1.0")
 
-# Enable CORS for frontend testing or integration
+# FASTAPI initializing 
+app = FastAPI(title="THE BOAT BROKERS ChatBot", description="Smart AI assistant for Boat Brokers website", version="2.0")
+# app.include_router(brochure_router)
+
+
+# Add Cors for get/post security
 app.add_middleware(
+    
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins = ["*"],
+    allow_credentials = True,
+    allow_methods = ["*"],
+    allow_headers = ["*"]
+
 )
 
-# In-memory conversation history (not backed by DB)
-memory = ChatMemory()
 
-# Define Pydantic model for input
+# Pydantic base model for two inputs
 class ChatRequest(BaseModel):
-    query: str
-    session_id: Optional[str] = "default"  # Optional, defaults to 'default'
 
-# Pydantic model for report generation input
-class ReportRequest(BaseModel):
-    type: str
-    start: str
-    end: str
-    filter: Optional[str] = ""
+    session_id : str = 'admin'
+    user_input : str
 
-# Root endpoint
+
+# Root End point
 @app.get("/")
+
 def root():
-    return {"message": "Boat Admin Chatbot is running."}
 
-# Endpoint to handle chat messages and user queries
+    return {
+        "Message": "THE BOAT BROKERS ChatBot Runing ⚡"
+    }
+
+
+# Chat End Point
 @app.post("/chat")
-async def chat(request: ChatRequest):
+async def chat_endpoint(payload : ChatRequest):
+
     try:
-        user_query = request.query
-        session_id = request.session_id
-
-        if not user_query:
-            return JSONResponse(status_code=400, content={"error": "Missing 'query' field in request."})
-
-        # NEW: Check if it's a report request
-        if is_report_request(user_query):
-            filters = extract_report_filters(user_query)
-            msg, filepath = generate_csv_report(filters, filename="static/reports/auto_report.csv")
-            if filepath:
-                return FileResponse(
-                    path=filepath,
-                    media_type="text/csv",
-                    filename="auto_report.csv"
-                )
-            else:
-                return JSONResponse(status_code=500, content={"error": msg})
-
-        # Handle the chat request as usual
-        response = await handle_chat(user_query, session_id)
-        return JSONResponse(content=response)
-
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Internal error: {str(e)}"})
+        # Get session ID and User_input from input -> post (chat endpoint)
+        session_id = payload.session_id
+        user_input = payload.user_input
 
 
-# # Updated: Endpoint to generate reports using model-based input
-# @app.post("/generate-report")
-# async def generate_report_route(body: ReportRequest):
-#     table = body.type
-#     start = body.start
-#     end = body.end
-#     filter_str = body.filter
-
-#     try:
-#         file_path = generate_csv_report(table, start, end, filter_str)  # will generate the response from sql
-#         return {"download_url": f"/static/reports/{os.path.basename(file_path)}"}
-#     except Exception as e:
-#         return JSONResponse(status_code=500, content={"error": f"Report generation failed: {str(e)}"})
-
-# # Endpoint for downloading reports generated
-# @app.get("/static/reports/{filename}")
-# async def download_report(filename: str):
-#     file_path = f"static/reports/{filename}"
-#     if not os.path.exists(file_path):
-#         return JSONResponse(status_code=404, content={"error": "File not found."})
-
-#     return FileResponse(
-#         path=file_path,
-#         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-#         filename=filename
-#     )
-
-
-# Helper functions
-async def handle_chat(user_query: str, session_id: str = "default"):
-    try:
-        schema = fetch_schema()  # Fetch the schema for DB interaction
-        history = memory.get(session_id)  # Retrieve conversation history for the session
-        user_query_cleaned = normalize_nl_dates(user_query)  # Normalize date references
-
-        # Handle business-related queries by using GPT-4 model (Gemini)
-        if is_business_query(user_query_cleaned):
-            prompt = build_prompt(user_query_cleaned, schema, history)
-            response = model.generate_content(prompt).text.strip()
-            sql = extract_sql(response)
-
-            if sql:
-                result = run_query(sql)  # Execute SQL query
-                result_summary = f"Here's what I found:\n{result}" if isinstance(result, list) else result
-                memory.append(session_id, user_query, result_summary)  # Store result in history
-                return {
-                    "type": "db",
-                    "query": sql,
-                    "message": response,
-                    "result": result
-                }
-            else:
-                memory.append(session_id, user_query, response)  # Store response in history
-                return {"type": "chat", "message": response}
-
-        else:
-            # Handle casual chat or non-business queries
-            casual_response = model.generate_content(user_query_cleaned).text.strip()
-            memory.append(session_id, user_query, casual_response)
-            return {"type": "chat", "message": casual_response}
-
-    except Exception as e:
-        return {"type": "error", "message": str(e)}
-
-# Function to run SQL query in the database
-def run_query(sql: str):
-    try:
-        conn = get_connection()  # Get database connection
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(sql)
-        result = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return result
-    except Exception as e:
-        return {"error": str(e)}
+        # if user executes empty string
+        if not user_input:
+            return JSONResponse(status_code = 480, content = {"Error": " Missing 'query' field in the request"})
 
 
 
+        # Getting the paramaters which we gonna pass to the Necessary functions
+        schema = fetch_schema()
+        history_list = get_history(session_id)
+        history_str = "\n".join(history_list)
+        clause_sale = sales_report_select_clause()
 
 
+        # Lets calculate the intent of User's Message
+        intent = llm_response(intent_prompt(user_input)).lower().strip()
 
+        # Chat handling after calculating the intent of User's Message
+        if intent == "query":
 
+            # Detect vague time expressions like "last month", "this year"
+            time_context = parse_vague_time_phrases(user_input)
 
+            sql = llm_response(sql_prompt(user_input, schema, history_str, time_context))
+            sql = cleaned_sql(sql)
 
-
-
-
-
-
-
-# # Loading the necessary libraries
-# import os
-# from dotenv import load_dotenv
-# import google.generativeai as google_ai
-# from typing import TypedDict, List, Dict, Any
-# from typing_extensions import Annotated
-
-# from db_connection import get_connection, show_database
-
-# load_dotenv(override = True)
-# print("Environment variables loaded.")
-
-# gemini_key = os.getenv("GEMINI_API_KEY")
-
-# if not gemini_key:
-#     raise ValueError("Gemini API key not found in environment variables.")
-
-# google_ai.configure(api_key=gemini_key)
-
-# model = google_ai.GenerativeModel('gemini-2.0-flash')
-# print("Gemini model configured.")
-
-# tables = [
-
-#     'boat_buyers', 'boat_sellers', 'deals', 'failed_jobs', 'job_batches', 'jobs', 
-#     'leads', 'marketings', 'reports', 'users'
-
-# ]
-
-# for table in tables:
-#     print(table)
-
-
-# prompt = """
-# You are a database expert. You have to write a query to show the databases in the MySQL server from user input.
-# You have to write the query in a way that it will not show any error.
-# Maintain the context of the user input and remeber the previous conversation and queries.
-# Start conversation with the user from greetings and then ask the user what he wants to do with the database.
-# Then write the query according to the user input.
-
-
-
-# input: {user_input}
-# EXAMPLE: How many sales have been made in the last month? -> query
-# output: SELECT COUNT(*) FROM sales WHERE sale_date >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH); 
-# EXAMPLE: what is the total revenue generated from the sales in the last month? ->query
-# output: SELECT SUM(revenue) FROM sales WHERE sale_date >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH);
-# Example: Hello, whats up? -> conversation
-# output: Hello! I'm here to help you with your database queries. So, how can I assist you today?
-
-
-# user: {user_input}
-# output: {response}
-
-# """
-
-# # Cache schemas after the first retrieval
-# schema_cache = {}
-
-# # @tool
-# def get_schema_tool(table_name: str) -> str:
-#     """Get the schema and sample data for a specific table"""
-#     if table_name in schema_cache:
-#         return schema_cache[table_name]
-    
-#     print(f"[Tool Log] get_schema_tool called with table_name={table_name}")
-    
-#     try:
-#         connection = get_connection()
-#         cursor = connection.cursor(dictionary=True)
-        
-#         # Get schema
-#         cursor.execute(f"SHOW CREATE TABLE {table_name}")
-#         schema_result = cursor.fetchone()
-#         schema = schema_result['Create Table']
-        
-#         # Get sample data (first 5 rows)
-#         cursor.execute(f"SELECT * FROM {table_name} LIMIT 5")
-#         sample_data = cursor.fetchall()
-        
-#         # Format the response
-#         response = f"Table: {table_name}\n\nSCHEMA:\n{schema}\n\nSAMPLE DATA:"
-#         for row in sample_data:
-#             response += f"\n{row}"
+            if not sql:
+                return {"Response": "I couldn't generate a valid SQL query. Please repharase." }
             
-#         cursor.close()
-#         connection.close()
+            # This will not allow user to perform any bold operation through chatbot
+            if not is_safe_sql(sql):
+                return {"Response": "Unsafe command detected ❌ Sorry, I'm not allowed to perform these type of tasks"}
+            
+            result = execute_query(sql)
+            prompt = llm_prompt(user_input=user_input, query_result=result, history=history_str)
+
+            # Streaming Gemini response
+            def stream_gen():
+
+                full_response = ""
+                for chunk in llm_response_stream(prompt):
+                    full_response += chunk
+                    yield chunk
+
+                append_to_history(session_id, user_input, full_response)
+
+            return StreamingResponse(stream_gen(), media_type="text/plain")
+
+        elif intent == "conversation":
+
+            def stream_gen():
+            
+                full_response = ""
+                for chunk in llm_response_stream(user_input):
+                    full_response += chunk
+                    yield chunk
+            
+                append_to_history(session_id, user_input, full_response)
+
+            return StreamingResponse(stream_gen(), media_type="text/plain")
         
-#         # Cache the schema
-#         schema_cache[table_name] = response
-#         return response
-        
-#     except Exception as e:
-#         return f"Error retrieving schema and data: {str(e)}"
+        elif intent == "report":
 
-# # @tool
-# def execute_query_tool(query: str) -> list[dict[str, any]]:
-#     """Execute a SQL query using a connection from the pool"""
-#     connection = None
-#     try:
-#         print(f"[Tool Log] Attempting to get a connection from the pool...")
-#         connection = get_connection()
-#         if not connection:
-#             print("[Tool Log] Failed to get a connection from the pool")
-#             return []
-        
-#         print(f"[Tool Log] Executing query: {query}")
-#         cursor = connection.cursor(dictionary=True)
-#         cursor.execute(query)
-#         results = cursor.fetchall()
-#         print(f"[Tool Log] Query executed successfully. Results: {results}")
-        
-#         return results
-#     except Exception as e:
-#         print(f"[Tool Log] Error executing query: {str(e)}")
-#         return {
-#             "error": str(e)
-#         }
-#     finally:
-#         if connection:
-#             print("[Tool Log] Closing connection...")
-#             connection.close()
+            filters = extract_filters_via_llm(user_input)
+
+            prompt = build_where_clause_query(filters, clause_sale)
+            raw_llm_response = llm_response(prompt)
+            parsed = clean_llm_json_response(raw_llm_response)
+            query = parsed["query"]
+            params = parsed["params"]
 
 
-# class State(TypedDict):
-#     messages: Annotated[List[AnyMessage], add_messages]
-#     intent: str | None
-#     schema: str | None  
-#     chosen_table: str | None
-#     sql_query: str | None
-#     query_results: List[Dict] | None
-#     performance_metrics: Dict[str, str]
-#     thread_id: str | None
 
-# def print_performance_metrics(state: Dict) -> None:
-#     """Helper function to print performance metrics"""
-#     if "performance_metrics" in state:
-#         print("\nPerformance Metrics:")
-#         for metric, value in state["performance_metrics"].items():
-#             print(f"{metric.replace('_', ' ').title()}: {value}")
-#         print("This is the performance metrics of the query.")
-#     else:
-#         print("No performance metrics available for this query.")
 
-    
-# @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-# def call_model_with_retry(messages):
-#     print("Retrying to get the response")
-#     return model.generate_content(messages)
 
-# def conversational_agent_node(state: State) -> Dict[str, List[AIMessage]]:
-#     start_time = time.time()
-#     print("NODE: conversational_agent_node - RUNNING")
-    
-#     try:
-#         # Get all messages from state
-#         messages = state["messages"]
-        
-#         # Convert messages to Gemini format, filtering out SQL-related messages
-#         conversation_history = []
-#         for msg in messages:
-#             # Skip debug messages, SQL queries, and query results
-#             if (isinstance(msg, AIMessage) and isinstance(msg.content, str) and 
-#                 (msg.content.startswith("(Debug)") or 
-#                  msg.content.startswith("Generated SQL:") or 
-#                  msg.content.startswith("Retrieved schemas"))):
-#                 continue
-#             if isinstance(msg, ToolMessage):
-#                 continue
+            # where_sql, params, table = build_where_clause(filters)
+
+            # query = f"SELECT * FROM {table} {where_sql}"
+
+            conn = get_connection()
+            cursor = conn.cursor(dictionary=True)
+
+            cursor.execute(query, params)
+            result = cursor.fetchall()
+
+            if conn.is_connected():
+                cursor.close()
+                conn.close()
                 
-#             # Convert to Gemini format
-#             conversation_history.append({
-#                 "parts": [{"text": msg.content}],
-#                 "role": "user" if isinstance(msg, HumanMessage) else "model"
-#             })
+
+            return generate_excel_report(result, filters.get("type"))
         
-#         # Add system message at the beginning
-#         conversation_history.insert(0, {
-#             "parts": [{"text": """You are Chatbot for Boat Brokers specializing in Company Database Queries. 
-#             Maintain context of the conversation and remember important details.
-#             If asked about previous questions or information, recall them from the conversation history.
-#             """}],
-#             "role": "user"
-#         })
+        elif intent == "brochure":
 
-#         # Generate response with proper error handling
-#         try:
-#             response = model.generate_content(conversation_history)
-#             content = response.text
-#         except Exception as e:
-#             print(f"Gemini API error: {str(e)}")
-#             content = "Sorry, I'm having trouble generating a response right now."
+            boat_name = llm_response(f"""You have given a user input, your job is to detect the name of boat from this input 
+                                     and return only its name, nothing else. 
 
-#         return {
-#             "messages": [AIMessage(content=content)],
-#             "performance_metrics": {
-#                 **state.get("performance_metrics", {}),
-#                 "conversational_response_time": f"{(time.time()-start_time):.2f}s"
-#             }
-#         }
+                                     For example:
+
+                                     input: 'generate me a brochuer for alpha'
+                                     boat name: alpha
+                                     
+                                     input: 'generate a brochure for senorita'
+                                     boat name: senorita
+                                     
+                                     input: 'brochure for manaas'
+                                     boat name: manaas
+                                     
+                                     input: 'for clarita generate brochures'
+                                     boat name: clarita
+
+                                     user input:
+                                     {user_input}
+
+                                     """)
+            boat_name = boat_name.lower()
+
+            try:
+                conn = get_connection()
+
+                # Use separate cursors for separate queries
+                cursor1 = conn.cursor(dictionary=True)
+                cursor2 = conn.cursor(dictionary=True)
+
+                cursor1.execute("SELECT id FROM leads WHERE seller_boat_name = %s", (boat_name,))
+                result = cursor1.fetchone()
+
+                if not result:
+                    raise HTTPException(status_code=404, detail=f"There is no boat named in Database as: {boat_name}")
+                
+                lead_id = result['id']
+                
+                # Second query to check brochure availability
+                cursor2.execute("SELECT * FROM brochures WHERE name = %s", (boat_name,))
+                brochure_avl = cursor2.fetchone()
+
+                if not brochure_avl:
+                    raise HTTPException(status_code=404, detail="Brochure data not found. Please fill it from the Admin panel")
+                
+                else:
+                    return f"Here is your Brochure download link: https://admin.theboatbrokers.co.uk/admin/download/brochure/{lead_id} "
+
+            except mysql.connector.Error as err:
+                raise HTTPException(status_code=500, detail=str(err))
+
+            finally:
+                if conn.is_connected():
+                    cursor1.close()
+                    cursor2.close()
+                    conn.close()            
+
+
+            # return generate_brochure(boat_name)
         
-#     except Exception as e:
-#         print(f"Conversational Error: {str(e)}")
-#         return {
-#             "messages": [AIMessage(content="Error in conversation")],
-#             "performance_metrics": {
-#                 **state.get("performance_metrics", {}),
-#                 "error": str(e)[:100]  # Truncate long errors
-#             }
-#         }
+        else:
+            return {"Response": "Sorry I couldn't determine your intent. Try rephrasing"}
 
-
-# def refine_query_node(state: State) -> Dict[str, Any]:
-#     """Refine the user query into a SQL query"""
-#     start_time = time.time()
-#     print("NODE: refine_query_node - RUNNING")
-#     try:
-#         user_msg = next((msg.content for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)), "")
-        
-#         combined_prompt = f"""As an SQL expert, convert this user request into a valid SQL query using EXACT field names from these schemas:
-
-# USER REQUEST: "{user_msg}" """
-
-# SCHEMA = state.get("schema", None)
-
-# def get_schema_from_state(state: State) -> str:
-#     '''
-#     Get the schema from the state.
-#     '''
-#     if state.get('schema') is not None:
-#         return state['schema']
-#     else:
-#         return "No schema found in state."
+    except Exception as e:
+        return {"Error": str(e)}
     
-# def run_after_finding_intent(intent: str) -> str:
-#     """
-#     This function will continue the conversation after finding the intent.
-#     """
-#     if intent == "query":
-#         continue_conversation = "Yes, I can help you with that. Please provide the details of your query."
-
-#     elif intent == "conversation":
-#         continue_conversation = "Sure, let's continue our conversation. What would you like to discuss about?"
-        
-#     return 
 
 
+# user_input = "generate me a brochure of clarita"
 
+# boat_name = llm_response(f"""You have given a user input, your job is to detect the name of boat from this input 
+#                          and return only its name, nothing else. 
+#                          For example:
+#                          input: 'generate me a brochuer for alpha'
+#                          boat name: alpha
+#                          input: 'generate a brochure for senorita'
+#                          boat name: senorita
+#                          input: 'brochure for manaas'
+#                          boat name: manaas
+#                          input: 'for clarita generate brochures'
+#                          boat name: clarita
 
+#              user input: 
+#              {user_input}
+            
+#  """)
 
-    
+# boat_name = boat_name.lower()
+# for char in boat_name:
+#     print(char)
+

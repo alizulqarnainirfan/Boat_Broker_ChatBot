@@ -1,24 +1,43 @@
-## memory.py
+# Here will code for memory storage
 
-class ChatMemory:
-    def __init__(self):
-        self.sessions = {}
+from collections import defaultdict
 
-    def get(self, session_id: str):
-        """
-        Retrieve the conversation history for a given session.
-        If no history exists, return an empty list.
-        """
-        return self.sessions.get(session_id, [])
 
-    def append(self, session_id: str, user_message: str, bot_message: str):
-        """
-        Append a new message pair (user_message, bot_message) to the conversation history.
-        """
-        if session_id not in self.sessions:
-            self.sessions[session_id] = []
-        
-        self.sessions[session_id].append({
-            'user': user_message,
-            'bot': bot_message
-        })
+# session_memory = {
+#   "admin-123": ["...messages..."],
+#   "manager-456": ["...messages..."]
+# }
+
+
+session_memory = defaultdict(list)
+
+def get_history(session_id : str) -> list[str]:
+
+    """
+    Gets the previous history (if available) using session ID
+    """
+    return session_memory[session_id]
+
+def append_to_history(session_id : str, user_msg : str, bot_msg : str):
+    
+    """
+    Add into the history after conversation
+    """
+    session_memory[session_id].append(f"User {user_msg}")
+    session_memory[session_id].append(f"Assistant {bot_msg}")
+
+
+def clear_history(session_id : str):
+    
+    """
+    Clears the memory history using session ID
+    """
+
+    session_memory[session_id] = []
+
+
+
+
+
+
+

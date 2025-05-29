@@ -1,82 +1,122 @@
-## db.py
+# Database related all functions here
 
 import os
-import mysql.connector
-from mysql.connector import pooling
+# import mysql.connector
+from mysql.connector import errorcode
 from dotenv import load_dotenv
+import mysql.connector.pooling
 
-load_dotenv()
 
-connection_pool = None
+load_dotenv(override=True)
+
+pool = None
 
 def get_connection():
-    global connection_pool
-    if connection_pool is None:
-        connection_pool = mysql.connector.pooling.MySQLConnectionPool(
-            pool_name="boat_pool",
-            pool_size=5,
-            host=os.getenv("DB_HOST"),
-            database=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            port=int(os.getenv("DB_PORT")),
-            connect_timeout=30,
-            auth_plugin="mysql_native_password",
-        )
-    return connection_pool.get_connection()
+    
+    """
+    Gets the connection with the database
+    """
+    global pool
 
-def fetch_schema() -> str:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SHOW TABLES")
-    tables = [t[0] for t in cursor.fetchall()]
+    try:
+        if pool is None:
+            pool = mysql.connector.pooling.MySQLConnectionPool(
+                pool_name='boat_pool',
+                pool_size=10,
+                database = os.getenv("DB_NAME"),
+                host = os.getenv("DB_HOST"),
+                user = os.getenv("DB_USER"),
+                password = os.getenv("DB_PASSWORD"),
+                port = os.getenv("DB_PORT"),
+                auth_plugin = "mysql_native_password",
+                connect_timeout = 30,
+                raise_on_warnings = True
+            )
 
-    schema_text = ""
-    for table in tables:
-        cursor.execute(f"SHOW COLUMNS FROM {table}")
-        columns = [f"{col[0]}" for col in cursor.fetchall()]
-        schema_text += f"{table}({', '.join(columns)})\n"
-
-    cursor.close()
-    conn.close()
-    return schema_text
-
-def run_sql_query(sql: str):
+        return pool.get_connection()
+    
+    except mysql.connector.Error as e:
+        
+        if e.errno == errorcode.CR_CONN_HOST_ERROR:
+            raise Exception("Server IP isn't whitelisted. Please add this IP to server Whitelist")
+        
+        else:
+            raise Exception(f"Database Connection Error {str(e)}")
+        
+    
+def fetch_schema():
+    
+    """
+    Fetches the whole database as schema
+    """
+    
     try:
         conn = get_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(sql)
-        result = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return result
+        cursor = conn.cursor()
+
+        cursor.execute("SHOW TABLES")
+        tables = [t[0] for t in cursor.fetchall()]
+
+        schema = ""
+
+        for table in tables:
+            
+            cursor.execute(f"SHOW COLUMNS FROM {table}")
+            columns = [col[0] for col in cursor.fetchall()]
+
+            schema += f"{table}({','.join(columns)})\n"
+
+        return schema
+
     except Exception as e:
-        return {"error": str(e)}
-
-        
-def show_database(query):
-    """
-    Function to show the database's any feature by passing the query.
-    This Function will establish a connection to the database and execute the query
-    and check if the connection is working perfectly.
-    """
-
-    try:
-        connection = get_connection()
-        cursor = connection.cursor()
-        cursor.execute(query)
-        databases = cursor.fetchall()
-        # print("Here are the results of your query:")
-        for db in databases:
-            print(db[0])
-
-    except mysql.connector.Error as e:
-        print(f"Error: {str(e)}")
+        return f"Error: {str(e)}"
     
     finally:
-        connection.close()
+
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+
+def execute_query(sql : str):
+
+    """
+    Executes the sql query and fetch result from Database
+    """
+
+    cursor = None
+    conn = None
+    
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(sql)
+        result = cursor.fetchall()
+
+        return result
+    
+    except Exception as e:
+        return f"Error: {str(e)}"
+    
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
 
     
-# show_database("SHOW TABLES")
 
-    
+
+
+
+
+
+
+        
+# ans = execute_query("SELECT * FROM leads;")
+# print(ans)
